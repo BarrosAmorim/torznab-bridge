@@ -372,7 +372,7 @@ function renderProviderUi(req, res) {
   res.type('html').send(renderConfigurePage({
     selectedProviders: adapterConfig.providers || [],
     selectedSources: adapterConfig.sources || [],
-    baseUrl: PUBLIC_BASE_URL.replace(/\/$/, ''),
+    baseUrl: getRequestBaseUrl(req).replace(/\/$/, ''),
     saved: req.query.saved === '1',
     configPath: getRuntimeConfigPath(),
   }));

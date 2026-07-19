@@ -37,7 +37,7 @@ export function getDefaultSources() {
     return [SOURCE_DATABASE];
   }
 
-  return [SOURCE_STREMIO];
+  return [SOURCE_BETOR, SOURCE_STREMIO];
 }
 
 export function getSourceMode() {

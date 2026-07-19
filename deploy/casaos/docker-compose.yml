@@ -3,14 +3,6 @@ services:
   torznab-bridge:
     image: ghcr.io/immatheushen/torznab-bridge:latest
     container_name: torznab-bridge
-    environment:
-      PORT: "9699"
-      TORZNAB_SOURCES: betor,stremio
-      TORZNAB_STREMIO_URL: https://torrentio.strem.fun/brazuca
-      TORZNAB_BETOR_URL: https://catalogo.betor.top
-      TORZNAB_BASE_URL: http://192.168.1.100:9699
-      TORZNAB_CONFIGURATION: brazuca
-      TORZNAB_RUNTIME_CONFIG_PATH: /config/torznab-ui.json
     labels:
       icon: https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Prowlarr/icon.png
     ports:
@@ -33,15 +25,6 @@ services:
           description:
             en_us: Persistent configuration directory.
             pt_br: Diretório persistente de configuração.
-      envs:
-        - container: TORZNAB_BASE_URL
-          description:
-            en_us: Public base URL used in generated links.
-            pt_br: URL pública usada nos links gerados.
-        - container: TORZNAB_SOURCES
-          description:
-            en_us: Enabled sources, comma-separated.
-            pt_br: Indexadores habilitados, separados por vírgula.
 networks:
   default:
     name: torznab-bridge_default
