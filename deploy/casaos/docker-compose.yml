@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
     volumes:
       - type: bind
-        source: /DATA/AppData/torznab-bridge/config
+        source: /mnt/Storage1/AppData/torznab-bridge/config
         target: /config
     x-casaos:
       ports:
