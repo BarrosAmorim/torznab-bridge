@@ -4,14 +4,73 @@ import titleParser from 'parse-torrent-title';
 import { buildMagnetUrlFromParts, getAdapterConfiguration, parseSizeToBytes } from './release.js';
 import { SOURCE_STREMIO } from './source.js';
 
-const STREMIO_BASE_URL = (process.env.TORZNAB_STREMIO_URL || 'https://torrentio.strem.fun/brazuca').replace(/\/$/, '');
-const STREMIO_TIMEOUT = parseInt(process.env.TORZNAB_STREMIO_TIMEOUT_MS || '20000', 10);
+const DEFAULT_STREMIO_BASE_URL = 'https://torrentio.strem.fun/providers=comando,bludv,micoleaodublado|language=portuguese|qualityfilter=cam,scr';
+const STREMIO_BASE_URL = (process.env.TORZNAB_STREMIO_URL || DEFAULT_STREMIO_BASE_URL).replace(/\/$/, '');
+const STREMIO_TIMEOUT = parseInt(process.env.TORZNAB_STREMIO_TIMEOUT_MS || '12000', 10);
+const STREMIO_RETRY_MAX_ATTEMPTS = parseInt(process.env.TORZNAB_STREMIO_RETRY_MAX_ATTEMPTS || '2', 10);
+const STREMIO_RETRY_BASE_DELAY_MS = parseInt(process.env.TORZNAB_STREMIO_RETRY_BASE_DELAY_MS || '500', 10);
+const STREMIO_CIRCUIT_OPEN_MS = parseInt(process.env.TORZNAB_STREMIO_CIRCUIT_OPEN_MS || `${60 * 1000}`, 10);
+const STREMIO_STREAM_CACHE_TTL_MS = parseInt(process.env.TORZNAB_STREMIO_STREAM_CACHE_TTL_MS || `${5 * 60 * 1000}`, 10);
+const STREMIO_STREAM_CACHE_STALE_MS = parseInt(process.env.TORZNAB_STREMIO_STREAM_CACHE_STALE_MS || `${6 * 60 * 60 * 1000}`, 10);
 const RELEASE_CACHE_TTL_MS = parseInt(process.env.TORZNAB_RELEASE_CACHE_TTL_MS || `${60 * 60 * 1000}`, 10);
 const releaseCache = new Map();
 const metaTitleCache = new Map();
+const streamCache = new Map();
+const inflightRequests = new Map();
+const circuitBreaker = {
+  state: 'closed',
+  openedAt: undefined,
+  openUntilMs: undefined,
+  lastFailureAt: undefined,
+  lastFailureReason: undefined,
+  halfOpenProbeInFlight: false,
+};
+const requestMetrics = {
+  lastRequestAt: undefined,
+  lastRequestDurationMs: undefined,
+  lastSuccessAt: undefined,
+  lastSuccessDurationMs: undefined,
+  lastFailureAt: undefined,
+  lastFailureDurationMs: undefined,
+};
+
+export function isTemporaryStremioError(error) {
+  return Boolean(error?.temporary && error?.source === SOURCE_STREMIO);
+}
+
+export function getStremioRuntimeStatus() {
+  pruneStreamCache();
+  const cachedStreams = Array.from(streamCache.values());
+  const now = Date.now();
+
+  return {
+    circuitBreaker: {
+      state: circuitBreaker.state,
+      openedAt: circuitBreaker.openedAt,
+      lastFailureAt: circuitBreaker.lastFailureAt,
+      lastFailureReason: circuitBreaker.lastFailureReason,
+      halfOpenProbeInFlight: circuitBreaker.halfOpenProbeInFlight,
+      openRemainingMs: getCircuitOpenRemainingMs(now),
+    },
+    timing: {
+      timeoutMs: STREMIO_TIMEOUT,
+      ...requestMetrics,
+    },
+    cache: {
+      streamEntries: streamCache.size,
+      freshStreamEntries: cachedStreams.filter(entry => entry.expiresAt > now).length,
+      staleStreamEntries: cachedStreams.filter(entry => entry.expiresAt <= now && entry.staleUntil > now).length,
+      inflightRequests: inflightRequests.size,
+    },
+  };
+}
 
 export async function checkStremioHealth() {
-  await axios.get(`${STREMIO_BASE_URL}/manifest.json`, { timeout: STREMIO_TIMEOUT });
+  await fetchStremioJson(`${STREMIO_BASE_URL}/manifest.json`, {
+    allowCache: false,
+    allowStale: false,
+    logKey: 'health',
+  });
 }
 
 export async function searchStremioReleaseRows(options = {}) {
@@ -163,10 +222,247 @@ export async function getStremioReleaseRowByGuid(guid) {
 }
 
 async function fetchStreams(type, id) {
-  const response = await axios.get(`${STREMIO_BASE_URL}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`, {
-    timeout: STREMIO_TIMEOUT,
+  const url = `${STREMIO_BASE_URL}/stream/${encodeURIComponent(type)}/${encodeURIComponent(id)}.json`;
+  const data = await fetchStremioJson(url, {
+    allowCache: true,
+    allowStale: true,
+    logKey: `${type}:${id}`,
   });
-  return response.data?.streams || [];
+  return data?.streams || [];
+}
+
+async function fetchStremioJson(url, { allowCache, allowStale, logKey }) {
+  pruneStreamCache();
+  const cacheEntry = allowCache ? getStreamCacheEntry(url) : undefined;
+  if (cacheEntry?.freshData !== undefined) {
+    console.log(`[stremio:cache] Respondendo ${logKey} pelo cache fresco.`);
+    return cacheEntry.freshData;
+  }
+
+  const inflightRequest = inflightRequests.get(url);
+  if (inflightRequest) {
+    console.log(`[stremio:group] Agrupando consulta em andamento para ${logKey}.`);
+    return inflightRequest;
+  }
+
+  const requestPromise = runStremioRequest(url, logKey)
+      .then(data => {
+        if (allowCache) {
+          cacheStreamResponse(url, data);
+        }
+        return data;
+      })
+      .catch(error => {
+        if (allowStale && cacheEntry?.staleData !== undefined && isTemporaryStremioError(error)) {
+          console.warn(`[stremio:cache] Usando cache antigo para ${logKey} apos falha temporaria.`);
+          return cacheEntry.staleData;
+        }
+        throw error;
+      })
+      .finally(() => {
+        inflightRequests.delete(url);
+      });
+
+  inflightRequests.set(url, requestPromise);
+  return requestPromise;
+}
+
+async function runStremioRequest(url, logKey) {
+  const circuitContext = beginCircuitRequest();
+  const startedAt = Date.now();
+  let lastError;
+
+  requestMetrics.lastRequestAt = new Date(startedAt).toISOString();
+
+  try {
+    for (let attempt = 1; attempt <= STREMIO_RETRY_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        const response = await axios.get(url, { timeout: STREMIO_TIMEOUT });
+        const durationMs = Date.now() - startedAt;
+        markCircuitSuccess(circuitContext, durationMs);
+        return response.data;
+      } catch (rawError) {
+        const error = normalizeStremioError(rawError);
+        lastError = error;
+
+        if (!shouldRetryImmediately(error) || attempt >= STREMIO_RETRY_MAX_ATTEMPTS) {
+          break;
+        }
+
+        const delayMs = computeRetryDelayMs(attempt);
+        console.warn(`[stremio:retry] Retry ${attempt}/${STREMIO_RETRY_MAX_ATTEMPTS - 1} para ${logKey} em ${delayMs}ms.`, {
+          code: error.code,
+        });
+        await sleep(delayMs);
+      }
+    }
+
+    throw lastError || createTemporaryStremioError(undefined, 'retry_exhausted');
+  } catch (error) {
+    const normalizedError = isTemporaryStremioError(error) ? error : normalizeStremioError(error);
+    markCircuitFailure(normalizedError, circuitContext, Date.now() - startedAt);
+    throw normalizedError;
+  }
+}
+
+function beginCircuitRequest() {
+  const now = Date.now();
+  if (circuitBreaker.state === 'open') {
+    const remainingMs = getCircuitOpenRemainingMs(now);
+    if (remainingMs > 0) {
+      throw createTemporaryStremioError(503, 'circuit_open', { retryAfterMs: remainingMs });
+    }
+
+    circuitBreaker.state = 'half-open';
+    circuitBreaker.halfOpenProbeInFlight = false;
+    console.log('[stremio:circuit] Cooldown encerrado; executando probe half-open.');
+  }
+
+  if (circuitBreaker.state === 'half-open') {
+    if (circuitBreaker.halfOpenProbeInFlight) {
+      throw createTemporaryStremioError(503, 'circuit_half_open_busy', { retryAfterMs: 1000 });
+    }
+    circuitBreaker.halfOpenProbeInFlight = true;
+    return { halfOpenProbe: true };
+  }
+
+  return { halfOpenProbe: false };
+}
+
+function markCircuitSuccess(_context, durationMs) {
+  const now = new Date().toISOString();
+  circuitBreaker.state = 'closed';
+  circuitBreaker.openedAt = undefined;
+  circuitBreaker.openUntilMs = undefined;
+  circuitBreaker.lastFailureReason = undefined;
+  circuitBreaker.halfOpenProbeInFlight = false;
+  requestMetrics.lastRequestDurationMs = durationMs;
+  requestMetrics.lastSuccessAt = now;
+  requestMetrics.lastSuccessDurationMs = durationMs;
+}
+
+function markCircuitFailure(error, _context, durationMs) {
+  const nowMs = Date.now();
+  const retryAfterMs = Math.max(error.retryAfterMs || 0, STREMIO_CIRCUIT_OPEN_MS);
+  const now = new Date(nowMs).toISOString();
+
+  requestMetrics.lastRequestDurationMs = durationMs;
+  requestMetrics.lastFailureAt = now;
+  requestMetrics.lastFailureDurationMs = durationMs;
+  circuitBreaker.halfOpenProbeInFlight = false;
+
+  if (!isTemporaryStremioError(error)) {
+    return;
+  }
+
+  circuitBreaker.state = 'open';
+  circuitBreaker.openedAt = now;
+  circuitBreaker.openUntilMs = nowMs + retryAfterMs;
+  circuitBreaker.lastFailureAt = now;
+  circuitBreaker.lastFailureReason = error.message;
+  error.retryAfterMs = retryAfterMs;
+  console.warn(`[stremio:circuit] Circuito aberto por ${retryAfterMs}ms apos ${error.code || error.statusCode || 'falha temporaria'}.`);
+}
+
+function getCircuitOpenRemainingMs(now = Date.now()) {
+  if (circuitBreaker.state !== 'open' || !circuitBreaker.openUntilMs) {
+    return 0;
+  }
+  return Math.max(0, circuitBreaker.openUntilMs - now);
+}
+
+function normalizeStremioError(error) {
+  const statusCode = error?.response?.status || error?.statusCode;
+  const code = error?.code || error?.cause?.code;
+  const temporary = isTemporaryStatus(statusCode) || isTemporaryNetworkCode(code);
+
+  if (!temporary) {
+    return error;
+  }
+
+  error.temporary = true;
+  error.source = SOURCE_STREMIO;
+  error.statusCode = statusCode;
+  error.retryAfterMs = parseRetryAfterMs(error?.response?.headers?.['retry-after']);
+  return error;
+}
+
+function createTemporaryStremioError(statusCode, reason, details = {}) {
+  const error = new Error(reason);
+  error.temporary = true;
+  error.source = SOURCE_STREMIO;
+  error.statusCode = statusCode;
+  error.code = reason;
+  Object.assign(error, details);
+  return error;
+}
+
+function isTemporaryStatus(statusCode) {
+  return statusCode === 429 || (statusCode >= 500 && statusCode < 600);
+}
+
+function isTemporaryNetworkCode(code) {
+  return ['ECONNABORTED', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EAI_AGAIN'].includes(code);
+}
+
+function shouldRetryImmediately(error) {
+  if (error.statusCode || ['ECONNABORTED', 'ETIMEDOUT'].includes(error.code)) {
+    return false;
+  }
+  return ['ECONNRESET', 'ECONNREFUSED', 'ENETUNREACH', 'EAI_AGAIN'].includes(error.code);
+}
+
+function parseRetryAfterMs(rawValue) {
+  if (rawValue == null || `${rawValue}`.trim() === '') {
+    return undefined;
+  }
+
+  const seconds = Number(rawValue);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, Math.round(seconds * 1000));
+  }
+
+  const timestamp = Date.parse(`${rawValue}`);
+  return Number.isNaN(timestamp) ? undefined : Math.max(0, timestamp - Date.now());
+}
+
+function computeRetryDelayMs(attempt) {
+  return STREMIO_RETRY_BASE_DELAY_MS * (2 ** Math.max(0, attempt - 1));
+}
+
+function sleep(delayMs) {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
+}
+
+function cacheStreamResponse(key, data) {
+  const now = Date.now();
+  streamCache.set(key, {
+    data,
+    expiresAt: now + STREMIO_STREAM_CACHE_TTL_MS,
+    staleUntil: now + STREMIO_STREAM_CACHE_STALE_MS,
+  });
+}
+
+function getStreamCacheEntry(key) {
+  const entry = streamCache.get(key);
+  if (!entry) {
+    return undefined;
+  }
+
+  const now = Date.now();
+  return {
+    freshData: entry.expiresAt > now ? entry.data : undefined,
+    staleData: entry.staleUntil > now ? entry.data : undefined,
+  };
+}
+
+function pruneStreamCache() {
+  const now = Date.now();
+  for (const [key, entry] of streamCache.entries()) {
+    if (entry.staleUntil <= now) {
+      streamCache.delete(key);
+    }
+  }
 }
 
 async function resolveImdbId(query, type) {

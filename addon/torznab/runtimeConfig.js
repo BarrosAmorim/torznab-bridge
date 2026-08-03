@@ -18,8 +18,8 @@ export function getAdapterConfiguration() {
   const runtimeConfig = readRuntimeConfig();
   return {
     ...baseConfig,
-    providers: runtimeConfig.providers?.length ? runtimeConfig.providers : baseConfig.providers,
-    sources: runtimeConfig.sources?.length ? runtimeConfig.sources : getDefaultSources(),
+    providers: runtimeConfig.configured ? runtimeConfig.providers : baseConfig.providers,
+    sources: runtimeConfig.configured ? runtimeConfig.sources : getDefaultSources(),
   };
 }
 
@@ -53,6 +53,7 @@ function readRuntimeConfig() {
 
     const parsed = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     return {
+      configured: true,
       providers: normalizeProviders(parsed.providers),
       sources: normalizeRuntimeSources(parsed.sources),
     };

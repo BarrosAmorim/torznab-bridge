@@ -17,7 +17,13 @@ import {
   getReleaseRowByGuid,
   checkDatabaseHealth,
 } from './repository.js';
-import { checkStremioHealth, getStremioReleaseRowByGuid, searchStremioReleaseRows } from './stremio.js';
+import {
+  checkStremioHealth,
+  getStremioRuntimeStatus,
+  getStremioReleaseRowByGuid,
+  isTemporaryStremioError,
+  searchStremioReleaseRows,
+} from './stremio.js';
 import {
   checkBetorHealth,
   getBetorRuntimeStatus,
@@ -78,6 +84,7 @@ app.get('/health', async (_, res) => {
     checks: snapshot.indexers.filter(indexer => indexer.enabled),
     events: snapshot.events,
     betor: snapshot.betor,
+    stremio: snapshot.stremio,
   };
 
   res.json(response);
@@ -191,6 +198,7 @@ async function handleStatusRequest(req, res) {
     indexers: snapshot.indexers,
     events: snapshot.events,
     betor: snapshot.betor,
+    stremio: snapshot.stremio,
   });
 }
 
@@ -259,7 +267,7 @@ async function searchReleaseRows(options) {
 
   const remainingSources = orderedSources.filter(source => !resultsBySource.has(source));
   if (remainingSources.length) {
-    const sourceRows = await Promise.all(remainingSources.map(source => searchSourceRowsSafely(source, options)));
+    const sourceRows = await Promise.all(remainingSources.map(source => searchSourceRowsTolerantly(source, options)));
     sourceRows.forEach((rows, index) => {
       resultsBySource.set(remainingSources[index], rows);
     });
@@ -372,7 +380,7 @@ function renderProviderUi(req, res) {
   res.type('html').send(renderConfigurePage({
     selectedProviders: adapterConfig.providers || [],
     selectedSources: adapterConfig.sources || [],
-    baseUrl: PUBLIC_BASE_URL.replace(/\/$/, ''),
+    baseUrl: getRequestBaseUrl(req).replace(/\/$/, ''),
     saved: req.query.saved === '1',
     configPath: getRuntimeConfigPath(),
   }));
@@ -442,12 +450,16 @@ async function buildRuntimeStatus({ probeSources = false } = {}) {
   return {
     ...buildStatusSnapshot(sources),
     betor: getBetorRuntimeStatus(),
+    stremio: getStremioRuntimeStatus(),
   };
 }
 
 function isTemporarySourceError(source, error) {
   if (source === SOURCE_BETOR) {
     return isTemporaryBetorError(error);
+  }
+  if (source === SOURCE_STREMIO && isTemporaryStremioError(error)) {
+    return true;
   }
   const statusCode = error?.response?.status || error?.statusCode;
   const code = error?.code || error?.cause?.code;
@@ -484,7 +496,7 @@ async function searchWithBetorPrimary(options, orderedSources, resultsBySource) 
     fallbackStarted = true;
     fallbackReason = reason;
     console.log(`[search:fallback] Iniciando fallback do Stremio: ${reason}.`);
-    stremioPromise = searchSourceRowsSafely(SOURCE_STREMIO, options);
+    stremioPromise = searchSourceRowsTolerantly(SOURCE_STREMIO, options);
   };
 
   if (stremioEnabled) {
@@ -533,6 +545,19 @@ async function searchSourceRowsSafely(source, options) {
     const message = recordSourceFailure(source, error, { kind: 'search', temporary });
     console.error(`[search:${source}] ${message}`);
     throw error;
+  }
+}
+
+async function searchSourceRowsTolerantly(source, options) {
+  try {
+    return await searchSourceRowsSafely(source, options);
+  } catch (error) {
+    if (!isTemporarySourceError(source, error)) {
+      throw error;
+    }
+
+    console.warn(`[search:${source}] Falha temporaria isolada; continuando com as demais fontes.`);
+    return [];
   }
 }
 
