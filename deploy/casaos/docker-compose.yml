@@ -3,6 +3,8 @@ services:
   torznab-bridge:
     image: ghcr.io/immatheushen/torznab-bridge:latest
     container_name: torznab-bridge
+    environment:
+      TORZNAB_STREMIO_URL: https://torrentio.strem.fun/providers=comando,bludv,micoleaodublado|language=portuguese|qualityfilter=cam,scr
     labels:
       icon: https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Prowlarr/icon.png
     ports:

@@ -1,5 +1,10 @@
 import { Providers } from '../lib/filter.js';
 import { SOURCE_OPTIONS } from './source.js';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { version: APP_VERSION } = require('../package.json');
+const GITHUB_REPOSITORY_URL = 'https://github.com/imMatheusHen/torznab-bridge';
 
 export function renderConfigurePage({
   selectedProviders = [],
@@ -42,7 +47,7 @@ export function renderConfigurePage({
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Configuração do Torznab Bridge</title>
+  <title>Torznab Bridge v${escapeHtml(APP_VERSION)}</title>
   <style>
     :root {
       --bg: #07111b;
@@ -72,6 +77,7 @@ export function renderConfigurePage({
         linear-gradient(180deg, #040b13 0%, var(--bg) 100%);
     }
     a { color: #9edbff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     code {
       font-family: var(--font-mono);
       color: #d9e6ff;
@@ -99,6 +105,21 @@ export function renderConfigurePage({
       margin: 0 0 10px;
       font-size: clamp(2rem, 3.3vw, 2.9rem);
       letter-spacing: -0.03em;
+    }
+    .brand-link { color: inherit; }
+    .version-tag {
+      display: inline-flex;
+      vertical-align: middle;
+      align-items: center;
+      margin-left: 8px;
+      padding: 4px 9px;
+      border: 1px solid rgba(56, 209, 154, 0.45);
+      border-radius: 999px;
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 0.42em;
+      font-weight: 700;
+      letter-spacing: 0;
     }
     h2 {
       margin: 0;
@@ -373,7 +394,7 @@ export function renderConfigurePage({
     <section class="hero">
       <div class="hero-grid">
         <div>
-          <h1>Torznab Bridge</h1>
+          <h1><a class="brand-link" href="${GITHUB_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">Torznab Bridge</a><span class="version-tag">v${escapeHtml(APP_VERSION)}</span></h1>
           <p class="muted">Gerencie indexadores e providers em uma única interface. O bridge continua servindo resultados do Stremio mesmo quando o BeTor estiver temporariamente indisponível.</p>
           ${saved ? '<div class="hero-status">Configuração salva com sucesso.</div>' : ''}
         </div>
@@ -418,7 +439,7 @@ export function renderConfigurePage({
           <div class="provider-grid">${providerButtons}</div>
 
           <div class="footer" style="margin-top: 20px;">
-            <div class="meta">Arquivo persistido: <code>${escapeHtml(configPath || 'não configurado')}</code></div>
+            <div class="meta"><a href="${GITHUB_REPOSITORY_URL}" target="_blank" rel="noopener noreferrer">GitHub</a> · Arquivo persistido: <code>${escapeHtml(configPath || 'não configurado')}</code></div>
             <button class="btn-primary" type="submit">Salvar configuração</button>
           </div>
         </form>
