@@ -47,6 +47,7 @@ import {
 } from './monitor.js';
 import { renderConfigurePage } from './configurePage.js';
 import { getRuntimeConfigPath, saveRuntimeConfig } from './runtimeConfig.js';
+import { createEmbedTvRouter, createEmbedTvService } from './iptv/embedtv/index.js';
 
 const PORT = parseInt(process.env.PORT || process.env.TORZNAB_PORT || '9699', 10);
 const BIND_ADDRESS = process.env.TORZNAB_BIND_ADDRESS || '0.0.0.0';
@@ -56,6 +57,7 @@ const LOG_REQUESTS = process.env.TORZNAB_LOG_REQUESTS === '1';
 const BETOR_FALLBACK_DELAY_MS = parseInt(process.env.TORZNAB_BETOR_FALLBACK_DELAY_MS || '2500', 10);
 const DELIVERED_RELEASE_TTL_MS = parseInt(process.env.TORZNAB_RELEASE_CACHE_TTL_MS || `${60 * 60 * 1000}`, 10);
 const deliveredReleaseCache = new Map();
+const embedTvService = createEmbedTvService();
 
 const app = express();
 app.disable('x-powered-by');
@@ -70,6 +72,11 @@ app.use((req, _, next) => {
 
 app.get('/', renderProviderUi);
 app.get('/status', handleStatusRequest);
+app.use('/iptv/embedtv', createEmbedTvRouter({
+  service: embedTvService,
+  isEnabled: isEmbedTvEnabled,
+  getBaseUrl: getRequestBaseUrl,
+}));
 
 app.get('/health', async (_, res) => {
   const snapshot = await buildRuntimeStatus();
@@ -85,6 +92,7 @@ app.get('/health', async (_, res) => {
     events: snapshot.events,
     betor: snapshot.betor,
     stremio: snapshot.stremio,
+    iptv: snapshot.iptv,
   };
 
   res.json(response);
@@ -135,7 +143,8 @@ app.get('/configure', renderProviderUi);
 app.post('/configure', (req, res) => {
   const providers = normalizeProviderSelection(req.body?.providers);
   const sources = normalizeProviderSelection(req.body?.sources);
-  saveRuntimeConfig({ providers, sources });
+  const iptv = normalizeIptvSelection(req.body?.iptvEnabled);
+  saveRuntimeConfig({ providers, sources, iptv });
   recordConfigurationSaved({ providers, sources });
   res.redirect(303, '/configure?saved=1');
 });
@@ -189,7 +198,10 @@ async function handleApiRequest(req, res) {
 }
 
 async function handleStatusRequest(req, res) {
-  const snapshot = await buildRuntimeStatus({ probeSources: req.query.probe === '1' });
+  const snapshot = await buildRuntimeStatus({
+    probeSources: req.query.probe === '1',
+    probeIptv: req.query.probe === '1',
+  });
   res.json({
     service: 'torznab-bridge',
     ok: snapshot.ok,
@@ -199,6 +211,7 @@ async function handleStatusRequest(req, res) {
     events: snapshot.events,
     betor: snapshot.betor,
     stremio: snapshot.stremio,
+    iptv: snapshot.iptv,
   });
 }
 
@@ -367,6 +380,10 @@ function normalizeProviderSelection(rawProviders) {
   return [];
 }
 
+function normalizeIptvSelection(rawValue) {
+  return { enabled: rawValue === '1' || rawValue === true };
+}
+
 function buildAllowedProviderSet(providers = []) {
   const normalizedProviders = Array.isArray(providers)
     ? providers.map(normalizeProviderName).filter(Boolean)
@@ -380,6 +397,7 @@ function renderProviderUi(req, res) {
   res.type('html').send(renderConfigurePage({
     selectedProviders: adapterConfig.providers || [],
     selectedSources: adapterConfig.sources || [],
+    iptvEnabled: adapterConfig.iptv?.enabled !== false,
     baseUrl: getRequestBaseUrl(req).replace(/\/$/, ''),
     saved: req.query.saved === '1',
     configPath: getRuntimeConfigPath(),
@@ -442,16 +460,26 @@ async function checkSourceHealth(source) {
   }
 }
 
-async function buildRuntimeStatus({ probeSources = false } = {}) {
+async function buildRuntimeStatus({ probeSources = false, probeIptv = false } = {}) {
   const sources = getActiveSources();
+  const probes = [];
   if (probeSources) {
-    await Promise.all(sources.map(checkSourceHealth));
+    probes.push(Promise.all(sources.map(checkSourceHealth)));
   }
+  if (probeIptv && isEmbedTvEnabled()) {
+    probes.push(embedTvService.probe());
+  }
+  await Promise.all(probes);
   return {
     ...buildStatusSnapshot(sources),
     betor: getBetorRuntimeStatus(),
     stremio: getStremioRuntimeStatus(),
+    iptv: embedTvService.getStatus({ enabled: isEmbedTvEnabled() }),
   };
+}
+
+function isEmbedTvEnabled() {
+  return getAdapterConfiguration().iptv?.enabled !== false;
 }
 
 function isTemporarySourceError(source, error) {

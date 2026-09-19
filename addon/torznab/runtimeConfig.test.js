@@ -25,3 +25,10 @@ test('normalizes and persists selected providers and sources', () => {
   assert.deepEqual(configuration.providers, ['comando']);
   assert.deepEqual(configuration.sources, ['stremio']);
 });
+
+test('persists the IPTV enablement flag alongside the existing configuration', () => {
+  saveRuntimeConfig({ providers: [], sources: [], iptv: { enabled: false } });
+
+  const configuration = getAdapterConfiguration();
+  assert.deepEqual(configuration.iptv, { enabled: false });
+});
