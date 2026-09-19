@@ -8,7 +8,21 @@ import {
 } from './constants.js';
 
 export class EmbedTvError extends Error {
-  constructor(message, { statusCode, code, url, retryable = false, temporary = false, cause } = {}) {
+  constructor(message, {
+    statusCode,
+    code,
+    url,
+    retryable = false,
+    temporary = false,
+    cause,
+    method,
+    stage,
+    responseUrl,
+    redirected,
+    contentType,
+    refererHost,
+    cookiePresent,
+  } = {}) {
     super(message);
     this.name = 'EmbedTvError';
     this.statusCode = statusCode;
@@ -17,6 +31,13 @@ export class EmbedTvError extends Error {
     this.retryable = retryable;
     this.temporary = temporary;
     this.cause = cause;
+    this.method = method;
+    this.stage = stage;
+    this.responseUrl = responseUrl;
+    this.redirected = redirected;
+    this.contentType = contentType;
+    this.refererHost = refererHost;
+    this.cookiePresent = cookiePresent;
   }
 }
 
@@ -43,6 +64,7 @@ export class EmbedTvClient {
   async fetchJson(path, options = {}) {
     const response = await this.request(`${this.baseUrl}${path}`, {
       ...options,
+      stage: options.stage || 'api',
       headers: {
         Accept: 'application/json, text/plain, */*',
         'User-Agent': this.userAgent,
@@ -82,6 +104,7 @@ export class EmbedTvClient {
     const pageUrl = new URL(url);
     const result = await this.fetchText(url, {
       ...options,
+      stage: 'page',
       headers: {
         Referer: pageUrl.origin,
         Origin: pageUrl.origin,
@@ -118,7 +141,7 @@ export class EmbedTvClient {
     });
   }
 
-  async request(url, { method = 'GET', headers = {}, retry = true, signal, ...options } = {}) {
+  async request(url, { method = 'GET', headers = {}, retry = true, signal, stage = 'request', ...options } = {}) {
     const attempts = retry ? this.retryAttempts : 1;
     let lastError;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -131,6 +154,13 @@ export class EmbedTvClient {
             url: response.url || url,
             retryable: isRetryableStatus(response.status),
             temporary: isTemporaryStatus(response.status),
+            method,
+            stage,
+            responseUrl: response.url || url,
+            redirected: response.redirected,
+            contentType: response.headers.get('content-type') || undefined,
+            refererHost: getHeaderHost(headers, 'referer'),
+            cookiePresent: Boolean(getHeader(headers, 'cookie')),
           });
           if (!error.retryable || attempt >= attempts) {
             throw error;
@@ -149,6 +179,10 @@ export class EmbedTvClient {
             retryable: true,
             temporary: true,
             cause: rawError,
+            method,
+            stage,
+            refererHost: getHeaderHost(headers, 'referer'),
+            cookiePresent: Boolean(getHeader(headers, 'cookie')),
           });
         lastError = error;
         if (!error.retryable || attempt >= attempts) {
@@ -272,4 +306,19 @@ async function readResponseText(response, timeoutMs) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getHeader(headers, name) {
+  if (headers instanceof Headers) return headers.get(name);
+  const entry = Object.entries(headers || {}).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry?.[1];
+}
+
+function getHeaderHost(headers, name) {
+  try {
+    const value = getHeader(headers, name);
+    return value ? new URL(value).hostname : undefined;
+  } catch {
+    return undefined;
+  }
 }

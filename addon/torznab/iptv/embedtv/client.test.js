@@ -21,3 +21,29 @@ test('times out while reading a stalled text response', async () => {
     error => error.code === 'timeout' && error.statusCode === 504,
   );
 });
+
+test('attaches redacted-safe request diagnostics to upstream HTTP errors', async () => {
+  const client = new EmbedTvClient({
+    retryAttempts: 1,
+    fetchFn: async () => new Response('denied', {
+      status: 403,
+      headers: { 'content-type': 'text/html' },
+    }),
+  });
+
+  await assert.rejects(
+    client.fetchText('https://cdn.example/live.m3u8', {
+      stage: 'manifest',
+      headers: {
+        Referer: 'https://dynamic.embedtv.lat/afazenda',
+        Cookie: 'referer=secret-value',
+      },
+    }),
+    error => error.code === 'http_403'
+      && error.stage === 'manifest'
+      && error.method === 'GET'
+      && error.contentType === 'text/html'
+      && error.refererHost === 'dynamic.embedtv.lat'
+      && error.cookiePresent === true,
+  );
+});

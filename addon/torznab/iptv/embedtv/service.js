@@ -198,6 +198,7 @@ export class EmbedTvService {
     const resolution = await this.resolveChannel(channelId);
     const response = await this.client.fetchStream(targetUrl, {
       retry: false,
+      stage: 'resource',
       headers: resolution.headers,
     });
     if (!response.ok) {
@@ -327,7 +328,7 @@ export class EmbedTvService {
   async loadManifest(resolution) {
     let url = resolution.streamUrl;
     for (let depth = 0; depth < 3; depth += 1) {
-      const result = await this.client.fetchText(url, { retry: false, headers: resolution.headers });
+      const result = await this.client.fetchText(url, { retry: false, stage: 'manifest', headers: resolution.headers });
       if (isHlsBody(result.text, result.contentType)) {
         return { text: result.text, url, contentType: result.contentType };
       }
@@ -350,6 +351,7 @@ export class EmbedTvService {
     try {
       const response = await this.client.fetchStream(probeUrl, {
         retry: false,
+        stage: 'resource-probe',
         headers: { 'User-Agent': resolution.headers['User-Agent'] },
       });
       const direct = response.status >= 200 && response.status < 400;
@@ -376,15 +378,37 @@ export class EmbedTvService {
   recordFailure(error, context) {
     const status = error?.statusCode || error?.response?.status;
     const message = `${error?.message || 'falha desconhecida'}`.split('?')[0].slice(0, 220);
+    const diagnostic = buildFailureDiagnostic(error);
     this.recentFailures.unshift({
       at: new Date(this.clock()).toISOString(),
       context,
       statusCode: status,
       code: error?.code,
       message,
+      ...diagnostic,
     });
     this.recentFailures.splice(8);
+    console.warn(`[EmbedTV] channel=${context.split(':')[1] || '-'} stage=${diagnostic.stage || context} hostname=${diagnostic.hostname || '-'} status=${status || '-'} redirect=${diagnostic.redirected ? 'true' : 'false'} content-type=${diagnostic.contentType || '-'} referer-host=${diagnostic.refererHost || '-'} cookie-present=${diagnostic.cookiePresent ? 'true' : 'false'}`);
   }
+}
+
+function buildFailureDiagnostic(error) {
+  const url = error?.responseUrl || error?.url;
+  let hostname;
+  try {
+    hostname = url ? new URL(url).hostname : undefined;
+  } catch {
+    hostname = undefined;
+  }
+  return {
+    stage: error?.stage,
+    hostname,
+    method: error?.method,
+    redirected: Boolean(error?.redirected),
+    contentType: error?.contentType,
+    refererHost: error?.refererHost,
+    cookiePresent: Boolean(error?.cookiePresent),
+  };
 }
 
 export function createEmbedTvService(options) {

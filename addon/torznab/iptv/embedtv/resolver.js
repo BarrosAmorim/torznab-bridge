@@ -8,35 +8,53 @@ export function extractStreamCandidates(html, { pageUrl } = {}) {
       .replace(/\\\//g, '/');
   const raw = [];
   const patterns = [
-    /startPlayer\s*\(\s*["']([^"']+)["']/gi,
-    /data-stream\s*=\s*["']([^"']+)["']/gi,
-    /\bstream\s*:\s*["']([^"']+)["']/gi,
-    /(?:src|file|url)\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi,
-    /https?:\/\/[^\s"'<>]+?\.(?:m3u8|txt)(?:\?[^\s"'<>]*)?/gi,
+    { regex: /startPlayer\s*\(\s*["']([^"']+)["']/gi, allowUnknown: true },
+    { regex: /data-stream\s*=\s*["']([^"']+)["']/gi, allowUnknown: true },
+    { regex: /\bstream\s*:\s*["']([^"']+)["']/gi, allowUnknown: true },
+    { regex: /(?:src|file|url)\s*[:=]\s*["'](https?:\/\/[^"']+)["']/gi },
+    { regex: /https?:\/\/[^\s"'<>]+?\.(?:m3u8|txt)(?:\?[^\s"'<>]*)?/gi },
   ];
-  for (const pattern of patterns) {
-    pattern.lastIndex = 0;
+  for (const { regex, allowUnknown = false } of patterns) {
+    regex.lastIndex = 0;
     let match;
-    while ((match = pattern.exec(source))) {
-      raw.push(match[1] || match[0]);
+    while ((match = regex.exec(source))) {
+      const value = match[1] || match[0];
+      const prefix = source.slice(Math.max(0, match.index - 32), match.index);
+      const isStaticVariable =
+        /^src\s*[:=]/i.test(match[0]) && /\bvar\s+$/i.test(prefix);
+      raw.push({
+        value,
+        allowUnknown,
+        fallback: isStaticVariable,
+      });
     }
   }
 
   const candidates = [];
   const seen = new Set();
-  for (const value of raw) {
-    const url = toAbsoluteUrl(cleanCandidate(value), pageUrl);
+  for (const entry of raw) {
+    const url = toAbsoluteUrl(cleanCandidate(entry.value), pageUrl);
     if (!url || !isSafeUpstreamUrl(url) || seen.has(url)) continue;
+    const kind = classifyStreamUrl(url);
+    if (kind === 'unknown' && !entry.allowUnknown) continue;
     seen.add(url);
-    candidates.push({ url, kind: classifyStreamUrl(url), genericFallback: isGenericFallback(url) });
+    candidates.push({
+      url,
+      kind,
+      genericFallback: isGenericFallback(url),
+      fallback: entry.fallback,
+    });
   }
 
   const specific = candidates.filter(candidate => !candidate.genericFallback);
   return (specific.length ? specific : candidates).sort(compareCandidates);
 }
 
-export function selectStreamCandidate(candidates = []) {
-  return [...candidates].sort(compareCandidates)[0];
+export function selectStreamCandidate(candidates = [], { excludeFallback = false } = {}) {
+  const pool = excludeFallback
+    ? candidates.filter(candidate => !candidate.fallback && !candidate.genericFallback)
+    : candidates;
+  return [...pool].sort(compareCandidates)[0];
 }
 
 export function classifyStreamUrl(url) {
@@ -52,11 +70,16 @@ export async function resolveChannelPage(channel, client) {
   }
   const html = await client.fetchChannelPage(channel.pageUrl);
   const candidates = extractStreamCandidates(html, { pageUrl: channel.pageUrl });
-  const selected = selectStreamCandidate(candidates);
+  const browserChallenge = isBrowserChallengeFlow(html);
+  const selected = selectStreamCandidate(candidates, { excludeFallback: browserChallenge });
   if (!selected) {
-    throw new EmbedTvError('Nenhuma origem HLS encontrada na página do canal', {
-      code: 'stream_not_found',
+    throw new EmbedTvError(browserChallenge
+      ? 'EmbedTV exige a execução pública do Turnstile para gerar a origem do stream'
+      : 'Nenhuma origem HLS encontrada na página do canal', {
+      statusCode: browserChallenge ? 424 : undefined,
+      code: browserChallenge ? 'browser_challenge_required' : 'stream_not_found',
       url: channel.pageUrl,
+      stage: 'resolve',
     });
   }
   const page = new URL(channel.pageUrl);
@@ -73,6 +96,11 @@ export async function resolveChannelPage(channel, client) {
     candidates,
     resolvedAt: new Date().toISOString(),
   };
+}
+
+export function isBrowserChallengeFlow(html) {
+  return /startPlayer\s*\(\s*(?:data\.)?(?:url|stream|src)\s*\)/i.test(`${html || ''}`)
+    && /(?:turnstile|cloudflaire|get_token)/i.test(`${html || ''}`);
 }
 
 export function extractNestedManifestUrl(text, baseUrl) {

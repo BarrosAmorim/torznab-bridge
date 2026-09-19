@@ -4,12 +4,15 @@ import { isSafeUpstreamUrl } from './client.js';
 import {
   extractNestedManifestUrl,
   extractStreamCandidates,
+  isBrowserChallengeFlow,
   isHlsBody,
   selectStreamCandidate,
+  resolveChannelPage,
 } from './resolver.js';
 
 test('extracts current startPlayer, data-stream, txt and m3u8 forms without fixed CDN assumptions', () => {
   const html = `
+    <script src="https://cdn.example/player.js"></script>
     <div data-stream="https://cdn.example/live.txt"></div>
     <script>
       startPlayer("https://cdn.example/live.m3u8?token=abc");
@@ -18,6 +21,7 @@ test('extracts current startPlayer, data-stream, txt and m3u8 forms without fixe
   const candidates = extractStreamCandidates(html, { pageUrl: 'https://dynamic.embedtv.lat/espn' });
   assert.ok(candidates.some(candidate => candidate.url === 'https://cdn.example/live.m3u8?token=abc'));
   assert.ok(candidates.some(candidate => candidate.url === 'https://cdn.example/live.txt'));
+  assert.equal(candidates.some(candidate => candidate.url === 'https://cdn.example/player.js'), false);
   assert.equal(selectStreamCandidate(candidates).url, 'https://cdn.example/live.m3u8?token=abc');
 });
 
@@ -32,4 +36,23 @@ test('accepts HTTPS CDN origins but rejects insecure and private proxy targets',
   assert.equal(isSafeUpstreamUrl('http://cdn.example/live.m3u8'), false);
   assert.equal(isSafeUpstreamUrl('https://127.0.0.1/live.m3u8'), false);
   assert.equal(isSafeUpstreamUrl('https://[fd00::1]/live.m3u8'), false);
+});
+
+test('does not select static fallback when EmbedTV requires a browser challenge', async () => {
+  const html = `
+    <script>
+      fetch('https://api.cloudflaire.lat/get_token', { method: 'POST' });
+      startPlayer(data.url);
+      function startPlayer(src) { var src = 'https://cdn.example/static.txt'; }
+    </script>`;
+  const candidates = extractStreamCandidates(html, { pageUrl: 'https://dynamic.embedtv.lat/afazenda' });
+  assert.equal(isBrowserChallengeFlow(html), true);
+  assert.equal(candidates[0].fallback, true);
+  await assert.rejects(
+    resolveChannelPage({ id: 'afazenda', pageUrl: 'https://dynamic.embedtv.lat/afazenda' }, {
+      async fetchChannelPage() { return html; },
+      userAgent: 'test-agent',
+    }),
+    error => error.code === 'browser_challenge_required' && error.statusCode === 424,
+  );
 });

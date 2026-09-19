@@ -153,6 +153,7 @@ function sendError(res, error) {
   const status = error?.code === 'channel_not_found' ? 404
     : error?.code === 'invalid_channel_id' || error?.code === 'invalid_proxy_target' ? 400
       : error?.code === 'proxy_target_denied' ? 403
+        : error?.code === 'browser_challenge_required' ? 424
         : upstreamStatus && [401, 403, 404, 410].includes(upstreamStatus) ? 502
           : error?.code === 'timeout' ? 504
             : 502;
