@@ -6,6 +6,7 @@ import { getDefaultSources, normalizeSources, SOURCE_OPTIONS } from './source.js
 
 const CONFIG_PATH = process.env.TORZNAB_RUNTIME_CONFIG_PATH || '/config/torznab-ui.json';
 const DEFAULT_CONFIGURATION = process.env.TORZNAB_CONFIGURATION || 'brazuca';
+const DEFAULT_IPTV_ENABLED = process.env.TORZNAB_IPTV_ENABLED !== '0';
 const VALID_PROVIDER_KEYS = new Set(Providers.options.map(provider => provider.key.toLowerCase()));
 const VALID_SOURCE_KEYS = new Set(SOURCE_OPTIONS.map(source => source.key.toLowerCase()));
 
@@ -20,6 +21,7 @@ export function getAdapterConfiguration() {
     ...baseConfig,
     providers: runtimeConfig.configured ? runtimeConfig.providers : baseConfig.providers,
     sources: runtimeConfig.configured ? runtimeConfig.sources : getDefaultSources(),
+    iptv: runtimeConfig.configured ? runtimeConfig.iptv : { enabled: DEFAULT_IPTV_ENABLED },
   };
 }
 
@@ -31,12 +33,14 @@ export function getSavedSources() {
   return readRuntimeConfig().sources || [];
 }
 
-export function saveRuntimeConfig({ providers = [], sources = [] } = {}) {
+export function saveRuntimeConfig({ providers = [], sources = [], iptv } = {}) {
   const normalizedProviders = normalizeProviders(providers);
   const normalizedSources = normalizeRuntimeSources(sources);
+  const normalizedIptv = normalizeIptv(iptv);
   const payload = {
     providers: normalizedProviders,
     sources: normalizedSources,
+    iptv: normalizedIptv,
     savedAt: new Date().toISOString(),
   };
 
@@ -56,6 +60,7 @@ function readRuntimeConfig() {
       configured: true,
       providers: normalizeProviders(parsed.providers),
       sources: normalizeRuntimeSources(parsed.sources),
+      iptv: normalizeIptv(parsed.iptv),
     };
   } catch (error) {
     console.error('Failed to read runtime config', error);
@@ -78,4 +83,14 @@ function normalizeProviders(providers) {
 function normalizeRuntimeSources(sources) {
   return normalizeSources(sources)
       .filter(source => VALID_SOURCE_KEYS.has(source));
+}
+
+function normalizeIptv(value) {
+  if (typeof value === 'boolean') {
+    return { enabled: value };
+  }
+  if (!value || typeof value !== 'object') {
+    return { enabled: DEFAULT_IPTV_ENABLED };
+  }
+  return { enabled: value.enabled !== false };
 }

@@ -1,5 +1,6 @@
 import { Providers } from '../lib/filter.js';
 import { SOURCE_OPTIONS } from './source.js';
+import { renderEmbedTvPanel, renderEmbedTvStyles } from './iptvUi.js';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -9,6 +10,7 @@ const GITHUB_REPOSITORY_URL = 'https://github.com/imMatheusHen/torznab-bridge';
 export function renderConfigurePage({
   selectedProviders = [],
   selectedSources = [],
+  iptvEnabled = true,
   baseUrl = '',
   saved = false,
   configPath = '',
@@ -388,6 +390,7 @@ export function renderConfigurePage({
       }
     }
   </style>
+  ${renderEmbedTvStyles()}
 </head>
 <body>
   <main class="wrap">
@@ -434,6 +437,8 @@ export function renderConfigurePage({
           <p class="section-copy">Ative os indexadores desejados. O estado operacional é verificado separadamente para cada um deles.</p>
           <div class="indexer-grid">${indexerCards}</div>
 
+          ${renderEmbedTvPanel({ baseUrl, enabled: iptvEnabled })}
+
           <h2>Providers Torrentio</h2>
           <p class="section-copy">Filtre os providers aceitos quando o indexador Stremio responder com múltiplas origens.</p>
           <div class="provider-grid">${providerButtons}</div>
@@ -463,6 +468,7 @@ export function renderConfigurePage({
   <script>
     const providerCheckboxes = Array.from(document.querySelectorAll('input[name="providers"]'));
     const sourceCheckboxes = Array.from(document.querySelectorAll('input[name="sources"]'));
+    const iptvCheckbox = document.querySelector('input[name="iptvEnabled"]');
 
     function escapeHtml(value) {
       return String(value || '')
@@ -480,6 +486,7 @@ export function renderConfigurePage({
       for (const checkbox of sourceCheckboxes) {
         checkbox.closest('.indexer-card')?.classList.toggle('active', checkbox.checked);
       }
+      document.querySelector('[data-iptv-panel]')?.classList.toggle('active', Boolean(iptvCheckbox?.checked));
     }
 
     function applyStatusSnapshot(payload) {
@@ -522,6 +529,8 @@ export function renderConfigurePage({
       document.getElementById('stat-healthy').textContent = String(healthy);
       document.getElementById('stat-alerts').textContent = String(alerts);
 
+      applyIptvStatus(payload?.iptv);
+
       const eventsNode = document.getElementById('events');
       if (!events.length) {
         eventsNode.innerHTML = '<div class="event-empty">Aguardando os primeiros eventos do bridge.</div>';
@@ -557,6 +566,47 @@ export function renderConfigurePage({
       }).join('');
     }
 
+    function applyIptvStatus(iptv) {
+      if (!iptv) {
+        return;
+      }
+      const badge = document.querySelector('[data-iptv-status-badge]');
+      const message = document.querySelector('[data-iptv-status-message]');
+      if (badge) {
+        badge.textContent = iptv.statusLabel || 'Aguardando';
+        badge.className = 'status-badge status-' + (iptv.status || 'unknown');
+      }
+      if (message) {
+        message.textContent = iptv.message || 'Sem detalhes adicionais.';
+      }
+      const input = document.querySelector('input[name="iptvEnabled"]');
+      if (input && typeof iptv.enabled === 'boolean') {
+        input.checked = iptv.enabled;
+      }
+      const channels = document.querySelector('[data-iptv-channels]');
+      const events = document.querySelector('[data-iptv-events]');
+      const cache = document.querySelector('[data-iptv-cache]');
+      const resolution = document.querySelector('[data-iptv-resolution]');
+      const upstream = document.querySelector('[data-iptv-upstream]');
+      const catalogAt = document.querySelector('[data-iptv-catalog-at]');
+      const failure = document.querySelector('[data-iptv-last-failure]');
+      if (channels) channels.textContent = String(iptv.channelCount ?? '—');
+      if (events) events.textContent = String(iptv.eventCount ?? '—');
+      if (cache) cache.textContent = formatAge(iptv.cacheAgeMs);
+      if (resolution) resolution.textContent = iptv.lastResolutionAt || iptv.lastTestAt ? new Date(iptv.lastResolutionAt || iptv.lastTestAt).toLocaleString('pt-BR') : '—';
+      if (upstream) upstream.textContent = iptv.upstream || 'não testado';
+      if (catalogAt) catalogAt.textContent = iptv.catalogCachedAt ? new Date(iptv.catalogCachedAt).toLocaleString('pt-BR') : 'não atualizado';
+      if (failure) failure.textContent = iptv.lastFailure?.message || 'nenhuma';
+    }
+
+    function formatAge(value) {
+      if (!Number.isFinite(Number(value))) return '—';
+      const seconds = Math.max(0, Math.round(Number(value) / 1000));
+      if (seconds < 60) return seconds + 's';
+      if (seconds < 3600) return Math.round(seconds / 60) + 'min';
+      return Math.round(seconds / 3600) + 'h';
+    }
+
     async function refreshStatus(probe = false) {
       try {
         const response = await fetch(probe ? '/status?probe=1' : '/status', { cache: 'no-store' });
@@ -586,8 +636,9 @@ export function renderConfigurePage({
     });
 
     document.getElementById('refresh-status')?.addEventListener('click', () => refreshStatus(true));
+    document.getElementById('refresh-iptv-status')?.addEventListener('click', () => refreshStatus(true));
 
-    for (const checkbox of [...providerCheckboxes, ...sourceCheckboxes]) {
+    for (const checkbox of [...providerCheckboxes, ...sourceCheckboxes, ...(iptvCheckbox ? [iptvCheckbox] : [])]) {
       checkbox.addEventListener('change', syncSelections);
     }
 
